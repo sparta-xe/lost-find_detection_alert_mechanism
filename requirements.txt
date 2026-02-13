@@ -1,0 +1,24 @@
+# Core dependencies
+opencv-python>=4.8.0
+numpy>=1.24.0
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Web interface
+streamlit>=1.28.0
+pillow>=10.0.0
+pandas>=2.0.0
+
+# Image processing and computer vision
+scikit-image>=0.21.0
+matplotlib>=3.7.0
+
+# Utilities
+pathlib2>=2.3.7
+tqdm>=4.65.0
+argparse
+
+# Optional: For better performance
+# opencv-contrib-python>=4.8.0  # Additional OpenCV modules
+# numba>=0.57.0  # JIT compilation for faster processing

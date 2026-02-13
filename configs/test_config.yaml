@@ -1,0 +1,74 @@
+# Test Configuration for Real-Time Object Tracking & Loss Detection
+# This configuration file can be loaded to customize test parameters
+
+# Video Source Configuration
+video:
+  source: "data/test_clips/cam1.mp4"
+  camera_id: "cam_1"
+  simulate_realtime: true
+  max_frames: null  # null = process all frames
+
+# Detection Configuration
+detection:
+  model: "yolov8n.pt"  # nano model for speed
+  confidence_threshold: 0.25
+  classes_to_track:
+    - person
+    - backpack
+    - handbag
+    - suitcase
+    - umbrella
+
+# Tracking Configuration
+tracking:
+  # Spatial matching (IoU)
+  iou_threshold: 0.3
+  
+  # Appearance-based matching
+  appearance_threshold: 0.7
+  appearance_weight: 0.5
+  
+  # Track lifecycle
+  max_missed_frames: 12  # ~0.4 seconds at 30fps
+  min_track_length: 3    # Minimum frames to be considered a valid track
+  
+  # Feature extraction
+  feature_dim: 128  # Embedding dimension for appearance features
+
+# Loss Detection Configuration (Crowd-Based)
+loss_detection:
+  enabled: true
+  min_track_age_for_loss: 5      # Frames before track can be considered lost
+  crowd_size_threshold: 5         # If N+ objects lost in area, raise crowd alert
+  loss_queue_timeout: 30          # Seconds to keep lost events in memory
+
+# Performance Configuration
+performance:
+  batch_processing: false
+  gpu_enabled: true
+  num_workers: 2
+  frame_skip: 0  # 0 = process all frames, N = process every Nth frame
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  log_file: "logs/test_detection_live.log"
+  verbose_output: true
+  print_every_n_frames: 30  # Print summary every N frames
+
+# Output Configuration
+output:
+  save_video: false
+  video_output_path: "runs/detect/predict/output.mp4"
+  draw_bboxes: true
+  draw_track_ids: true
+  draw_confidence_scores: true
+  track_history_length: 10  # Draw N previous frames of track history
+
+# Testing Configuration
+testing:
+  run_type: "live"  # "live" or "benchmark"
+  timeout_seconds: 300  # Max seconds to run test
+  print_statistics: true
+  save_statistics: true
+  statistics_output: "runs/test_statistics.json"
