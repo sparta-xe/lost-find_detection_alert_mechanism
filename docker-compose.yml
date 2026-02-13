@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  # Streamlit Web Interface
+  streamlit:
+    build:
+      context: .
+      target: streamlit
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+      - ./output:/app/output
+    environment:
+      - PYTHONPATH=/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # CLI Processing Service
+  processor:
+    build:
+      context: .
+      target: production
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+      - ./output:/app/output
+    environment:
+      - PYTHONPATH=/app
+    command: ["python", "run.py", "--config", "configs/production.json"]
+    restart: "no"
+    profiles:
+      - processing
+
+  # Development Environment
+  dev:
+    build:
+      context: .
+      target: development
+    ports:
+      - "8501:8501"
+      - "8888:8888"  # Jupyter if needed
+    volumes:
+      - .:/app
+      - ./data:/app/data
+    environment:
+      - PYTHONPATH=/app
+      - DEVELOPMENT=1
+    command: ["streamlit", "run", "streamlit_app.py", "--server.address", "0.0.0.0"]
+    profiles:
+      - development
+
+  # Database (SQLite is file-based, but this could be PostgreSQL for production)
+  # Uncomment if you want to use PostgreSQL instead of SQLite
+  # database:
+  #   image: postgres:13
+  #   environment:
+  #     POSTGRES_DB: lost_items
+  #     POSTGRES_USER: lost_items_user
+  #     POSTGRES_PASSWORD: secure_password
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+  #   restart: unless-stopped
+
+  # Redis for caching (optional)
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+  #   restart: unless-stopped
+  #   command: redis-server --appendonly yes
+  #   volumes:
+  #     - redis_data:/data
+
+# volumes:
+#   postgres_data:
+#   redis_data:
+
+networks:
+  default:
+    name: lost-item-detection

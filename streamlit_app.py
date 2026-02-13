@@ -298,10 +298,17 @@ def render_sidebar():
     proximity_threshold = st.sidebar.slider("Person-Object Proximity (pixels)", 50, 200, 100, 10)
     interaction_threshold = st.sidebar.slider("Interaction Distance (pixels)", 20, 100, 50, 5)
     
+    # Performance optimization settings
+    st.sidebar.subheader("⚡ Performance Settings")
+    frame_skip = st.sidebar.slider("Frame Skip (process every Nth frame)", 1, 5, 1, 1)
+    resize_factor = st.sidebar.slider("Resize Factor (for performance)", 0.5, 1.0, 1.0, 0.1)
+    use_gpu = st.sidebar.checkbox("Use GPU (if available)", True)
+    
     # Small object detection
     st.sidebar.subheader("🔬 Small Object Detection")
     enable_upscaling = st.sidebar.checkbox("Enable Upscaling for Small Objects", True)
     enhance_contrast = st.sidebar.checkbox("Enhance Contrast", True)
+    multi_scale_detection = st.sidebar.checkbox("Multi-scale Detection", True)
     
     max_frames = st.sidebar.number_input("Max Frames (0 = unlimited)", 0, 10000, 0)
     
