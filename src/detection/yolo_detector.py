@@ -5,48 +5,136 @@ import numpy as np
 class YOLODetector:
     def __init__(self, model_path="yolov8n.pt"):
         self.model = YOLO(model_path)
-        # Configure model for better small object detection
-        self.model.overrides['conf'] = 0.15  # Lower confidence for small objects
-        self.model.overrides['iou'] = 0.3    # Lower IoU for overlapping objects
-        self.model.overrides['max_det'] = 500  # More detections per image
-        self.model.overrides['imgsz'] = 640   # Higher resolution for small objects
+        # Industry-standard configuration for small objects
+        self.model.overrides['conf'] = 0.2    # Lowered for small objects
+        self.model.overrides['iou'] = 0.5     # Higher IoU for better separation
+        self.model.overrides['max_det'] = 1000  # More detections
+        self.model.overrides['imgsz'] = 1280   # Higher resolution (industry standard)
 
     def detect(self, frame, camera_id, timestamp):
-        # Preprocess frame for better small object detection
-        processed_frame = self._preprocess_frame(frame)
+        # Layer 1: Enhanced preprocessing for small objects
+        enhanced_frame = self._enhance_for_small_objects(frame)
         
-        # Run detection with multiple scales for small objects
         detections = []
         
-        # Original scale detection
-        results = self.model(processed_frame, verbose=False)[0]
-        detections.extend(self._extract_detections(results, camera_id, timestamp, scale=1.0))
+        # Multi-scale detection (industry approach)
+        scales = [1.0, 1.5, 2.0]  # Original, 1.5x, 2x upscaling
         
-        # Upscaled detection for very small objects
-        if min(frame.shape[:2]) < 800:  # Only upscale if image is small
-            upscaled_frame = cv2.resize(processed_frame, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
-            upscaled_results = self.model(upscaled_frame, verbose=False)[0]
-            upscaled_detections = self._extract_detections(upscaled_results, camera_id, timestamp, scale=1.5)
-            detections.extend(upscaled_detections)
+        for scale in scales:
+            if scale != 1.0:
+                h, w = enhanced_frame.shape[:2]
+                scaled_frame = cv2.resize(enhanced_frame, (int(w * scale), int(h * scale)), 
+                                        interpolation=cv2.INTER_CUBIC)
+            else:
+                scaled_frame = enhanced_frame
+            
+            # Industry-standard YOLO prediction
+            results = self.model.predict(
+                scaled_frame,
+                conf=0.2,        # Low confidence for small objects
+                imgsz=1280,      # High resolution
+                iou=0.5,         # Better separation
+                verbose=False
+            )[0]
+            
+            scale_detections = self._extract_detections(results, camera_id, timestamp, scale)
+            detections.extend(scale_detections)
         
-        # Remove duplicate detections
-        detections = self._remove_duplicates(detections)
+        # Remove duplicates using NMS
+        detections = self._advanced_nms(detections)
         
         return detections
     
-    def _preprocess_frame(self, frame):
-        """Preprocess frame for better detection of small objects."""
-        # Enhance contrast and brightness for small objects
+    def _enhance_for_small_objects(self, frame):
+        """Industry-standard enhancement for small object detection."""
+        # 1. Contrast enhancement using CLAHE
         lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
         
-        # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) to L channel
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
         l = clahe.apply(l)
         
-        # Merge channels and convert back to BGR
         enhanced = cv2.merge([l, a, b])
         enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+        
+        # 2. Sharpening filter for small objects
+        kernel = np.array([[-1,-1,-1],
+                          [-1, 9,-1],
+                          [-1,-1,-1]])
+        sharpened = cv2.filter2D(enhanced, -1, kernel)
+        
+        # 3. Blend original and sharpened (industry technique)
+        result = cv2.addWeighted(enhanced, 0.7, sharpened, 0.3, 0)
+        
+        return result
+    
+    def _extract_detections(self, results, camera_id, timestamp, scale=1.0):
+        """Extract detections with scale adjustment."""
+        detections = []
+        
+        if results.boxes is not None:
+            boxes = results.boxes.xyxy.cpu().numpy()
+            confidences = results.boxes.conf.cpu().numpy()
+            class_ids = results.boxes.cls.cpu().numpy().astype(int)
+            
+            for i, (box, conf, class_id) in enumerate(zip(boxes, confidences, class_ids)):
+                # Adjust coordinates for scale
+                x1, y1, x2, y2 = box / scale
+                
+                # Get class name
+                class_name = self.model.names[class_id]
+                
+                detection = {
+                    "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                    "confidence": float(conf),
+                    "label": class_name,
+                    "camera_id": camera_id,
+                    "timestamp": timestamp,
+                    "detection_id": f"{camera_id}_{timestamp}_{i}",
+                    "scale_factor": scale
+                }
+                
+                detections.append(detection)
+        
+        return detections
+    
+    def _advanced_nms(self, detections):
+        """Advanced Non-Maximum Suppression for multi-scale detections."""
+        if not detections:
+            return detections
+        
+        # Group by class
+        class_groups = {}
+        for det in detections:
+            label = det['label']
+            if label not in class_groups:
+                class_groups[label] = []
+            class_groups[label].append(det)
+        
+        final_detections = []
+        
+        for label, group in class_groups.items():
+            if len(group) <= 1:
+                final_detections.extend(group)
+                continue
+            
+            # Convert to format for cv2.dnn.NMSBoxes
+            boxes = []
+            confidences = []
+            
+            for det in group:
+                x1, y1, x2, y2 = det['bbox']
+                boxes.append([x1, y1, x2 - x1, y2 - y1])
+                confidences.append(det['confidence'])
+            
+            # Apply NMS
+            indices = cv2.dnn.NMSBoxes(boxes, confidences, 0.2, 0.5)
+            
+            if len(indices) > 0:
+                for i in indices.flatten():
+                    final_detections.append(group[i])
+        
+        return final_detections
         
         # Slight sharpening for small objects
         kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])

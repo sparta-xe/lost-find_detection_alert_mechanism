@@ -4,7 +4,7 @@ Professional configuration management system.
 import json
 import yaml
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import logging
 from dataclasses import dataclass, asdict
 

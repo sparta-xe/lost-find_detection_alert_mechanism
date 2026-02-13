@@ -1,11 +1,11 @@
 """
-Enhanced Object Detector with Person and Interaction Detection
+Enhanced Object Detector with Industry-Standard 3-Layer Detection System
 
 This module provides advanced object detection capabilities including:
-- Person detection and tracking
-- Object state detection (dropped, carried, stationary)
-- Person-object interaction detection
-- Theft/pickup attempt detection
+- Layer 1: Enhanced small object detection with multi-scale processing
+- Layer 2: Stationary object detection logic
+- Layer 3: Drop event detection using trajectory analysis
+- Fallback: Motion detection when YOLO fails
 """
 
 import cv2
@@ -16,68 +16,554 @@ from datetime import datetime, timedelta
 import logging
 
 from .yolo_detector import YOLODetector
+from .stationary_detector import StationaryObjectDetector, StationaryObject
+from .drop_detector import DropEventDetector, DropEvent
+from .motion_fallback import MotionFallbackDetector, MotionRegion
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class ObjectState:
-    """Represents the state of a detected object."""
+    """Represents the state of a detected object with enhanced tracking."""
     object_id: str
     bbox: Tuple[int, int, int, int]
     label: str
     confidence: float
-    state: str  # 'carried', 'dropped', 'stationary', 'moving', 'picked_up'
+    state: str  # 'normal', 'stationary', 'dropped', 'picked_up', 'falling'
     last_seen: datetime
     stationary_duration: float = 0.0
     person_nearby: bool = False
     interaction_detected: bool = False
     pickup_attempt: bool = False
-    picked_up_by: Optional[str] = None  # Person ID who picked it up
+    picked_up_by: Optional[str] = None
     pickup_timestamp: Optional[datetime] = None
-    original_position: Optional[Tuple[int, int]] = None  # Where it was dropped
-    tracking_priority: bool = False  # High priority for tracking
+    original_position: Optional[Tuple[int, int]] = None
+    tracking_priority: bool = False
+    
+    # Enhanced tracking data
+    velocity_history: List[float] = None
+    position_history: List[Tuple[int, int]] = None
+    drop_event: Optional[DropEvent] = None
+    motion_detected: bool = False
+
+    def __post_init__(self):
+        if self.velocity_history is None:
+            self.velocity_history = []
+        if self.position_history is None:
+            self.position_history = []
 
 
 @dataclass
 class PersonDetection:
-    """Represents a detected person."""
+    """Enhanced person detection with trajectory tracking."""
     person_id: str
     bbox: Tuple[int, int, int, int]
     confidence: float
     last_seen: datetime
-    trajectory: List[Tuple[int, int]] = None  # Center points over time
-    near_objects: Set[str] = None  # Object IDs near this person
+    trajectory: List[Tuple[int, int]] = None
+    near_objects: Set[str] = None
     suspicious_behavior: bool = False
-    carrying_objects: Set[str] = None  # Object IDs this person is carrying
-    pickup_history: List[str] = None  # Objects this person has picked up
+    carrying_objects: Set[str] = None
+    pickup_history: List[str] = None
+    
+    # Enhanced tracking
+    velocity: float = 0.0
+    direction: float = 0.0  # Angle in degrees
+
+    def __post_init__(self):
+        if self.trajectory is None:
+            self.trajectory = []
+        if self.near_objects is None:
+            self.near_objects = set()
+        if self.carrying_objects is None:
+            self.carrying_objects = set()
+        if self.pickup_history is None:
+            self.pickup_history = []
 
 
 @dataclass
 class InteractionEvent:
-    """Represents a person-object interaction."""
+    """Enhanced interaction event with trajectory data."""
     event_id: str
     person_id: str
     object_id: str
-    interaction_type: str  # 'pickup_attempt', 'touching', 'near', 'theft_suspected', 'item_picked_up'
+    interaction_type: str
     confidence: float
     timestamp: datetime
     duration: float = 0.0
     bbox_person: Tuple[int, int, int, int] = None
     bbox_object: Tuple[int, int, int, int] = None
-    alert_level: str = "info"  # 'info', 'warning', 'critical'
+    alert_level: str = "info"
+    
+    # Enhanced data
+    trajectory_data: List[Tuple[int, int, float]] = None
+    drop_event: Optional[DropEvent] = None
+
+    def __post_init__(self):
+        if self.trajectory_data is None:
+            self.trajectory_data = []
 
 
-@dataclass
-class PickupAlert:
-    """Represents an alert for a picked up item."""
-    alert_id: str
-    object_id: str
-    person_id: str
-    pickup_time: datetime
-    original_position: Tuple[int, int]
-    alert_message: str
-    severity: str  # 'low', 'medium', 'high'
+class IndustryStandardDetector:
+    """
+    Industry-standard 3-layer detection system:
+    Layer 1: Enhanced small object detection
+    Layer 2: Stationary object detection
+    Layer 3: Drop event detection
+    Fallback: Motion detection
+    """
+    
+    def __init__(self,
+                 detection_confidence: float = 0.2,
+                 stationary_threshold: float = 3.0,
+                 proximity_threshold: float = 100.0,
+                 interaction_threshold: float = 50.0):
+        """
+        Initialize the industry-standard detection system.
+        
+        Args:
+            detection_confidence: YOLO detection confidence threshold
+            stationary_threshold: Time before object is considered stationary
+            proximity_threshold: Distance for person-object proximity
+            interaction_threshold: Distance for interaction detection
+        """
+        # Layer 1: Enhanced YOLO detector
+        self.yolo_detector = YOLODetector()
+        
+        # Layer 2: Stationary object detector
+        self.stationary_detector = StationaryObjectDetector(
+            stationary_threshold=stationary_threshold,
+            velocity_threshold=5.0,
+            min_stationary_duration=2.0
+        )
+        
+        # Layer 3: Drop event detector
+        self.drop_detector = DropEventDetector(
+            fall_velocity_threshold=50.0,
+            min_fall_distance=30.0,
+            proximity_threshold=proximity_threshold
+        )
+        
+        # Fallback: Motion detector
+        self.motion_detector = MotionFallbackDetector(
+            motion_threshold=25,
+            min_contour_area=500
+        )
+        
+        # Configuration
+        self.detection_confidence = detection_confidence
+        self.proximity_threshold = proximity_threshold
+        self.interaction_threshold = interaction_threshold
+        
+        # Tracking state
+        self.tracked_objects: Dict[str, ObjectState] = {}
+        self.tracked_persons: Dict[str, PersonDetection] = {}
+        self.interaction_events: List[InteractionEvent] = []
+        self.next_object_id = 1
+        self.next_person_id = 1
+        self.next_event_id = 1
+        
+        logger.info("Industry-standard detector initialized")
+    
+    def process_frame(self, frame: np.ndarray, timestamp: float) -> Tuple[List[ObjectState], List[PersonDetection], List[InteractionEvent], List[DropEvent]]:
+        """
+        Process frame using industry-standard 3-layer detection.
+        
+        Args:
+            frame: Input video frame
+            timestamp: Frame timestamp
+            
+        Returns:
+            Tuple of (objects, persons, interactions, drop_events)
+        """
+        # Layer 1: Enhanced object detection
+        yolo_detections = self.yolo_detector.detect(frame, "camera", timestamp)
+        
+        # Fallback: Motion detection (when YOLO fails)
+        motion_regions = self.motion_detector.detect_motion(frame, timestamp)
+        
+        # Combine YOLO and motion detections
+        all_detections = self._combine_detections(yolo_detections, motion_regions, timestamp)
+        
+        # Separate objects and persons
+        object_detections = [d for d in all_detections if d['label'] != 'person']
+        person_detections = [d for d in all_detections if d['label'] == 'person']
+        
+        # Layer 2: Update stationary object tracking
+        stationary_objects = self.stationary_detector.process_frame(
+            frame, object_detections, timestamp
+        )
+        
+        # Layer 3: Detect drop events
+        drop_events = self.drop_detector.process_frame(
+            object_detections, person_detections, timestamp
+        )
+        
+        # Update object and person tracking
+        tracked_objects = self._update_object_tracking(object_detections, stationary_objects, drop_events, timestamp)
+        tracked_persons = self._update_person_tracking(person_detections, timestamp)
+        
+        # Detect interactions
+        interactions = self._detect_interactions(tracked_objects, tracked_persons, timestamp)
+        
+        return tracked_objects, tracked_persons, interactions, drop_events
+    
+    def _combine_detections(self, yolo_detections: List[Dict], motion_regions: List[MotionRegion], timestamp: float) -> List[Dict]:
+        """Combine YOLO detections with motion fallback detections."""
+        combined = yolo_detections.copy()
+        
+        # Add motion regions as fallback detections where YOLO missed
+        for region in motion_regions:
+            # Check if this motion region overlaps with any YOLO detection
+            overlaps = False
+            for yolo_det in yolo_detections:
+                if self._bboxes_overlap(region.bbox, tuple(yolo_det['bbox'])):
+                    overlaps = True
+                    break
+            
+            # If no overlap, add as fallback detection
+            if not overlaps:
+                fallback_detection = {
+                    'bbox': list(region.bbox),
+                    'confidence': min(0.5, region.motion_intensity / 100.0),  # Convert intensity to confidence
+                    'label': 'unknown_object',  # Generic label for motion-detected objects
+                    'camera_id': 'camera',
+                    'timestamp': timestamp,
+                    'detection_id': f"motion_{timestamp}_{len(combined)}",
+                    'source': 'motion_fallback'
+                }
+                combined.append(fallback_detection)
+        
+        return combined
+    
+    def _bboxes_overlap(self, bbox1: Tuple[int, int, int, int], bbox2: Tuple[int, int, int, int]) -> bool:
+        """Check if two bounding boxes overlap."""
+        x1_1, y1_1, x2_1, y2_1 = bbox1
+        x1_2, y1_2, x2_2, y2_2 = bbox2
+        return not (x2_1 < x1_2 or x2_2 < x1_1 or y2_1 < y1_2 or y2_2 < y1_1)
+    
+    def _update_object_tracking(self, detections: List[Dict], stationary_objects: List[StationaryObject], 
+                              drop_events: List[DropEvent], timestamp: float) -> List[ObjectState]:
+        """Update object tracking with enhanced state management."""
+        current_time = datetime.fromtimestamp(timestamp)
+        updated_objects = []
+        
+        # Create mapping of stationary objects
+        stationary_map = {obj.object_id: obj for obj in stationary_objects}
+        
+        # Create mapping of drop events
+        drop_map = {}
+        for event in drop_events:
+            drop_map[event.object_id] = event
+        
+        # Update existing objects and add new ones
+        detection_centers = [(self._get_bbox_center(d['bbox']), d) for d in detections]
+        matched_detections = set()
+        
+        # Match existing objects
+        for obj_id, obj in list(self.tracked_objects.items()):
+            obj_center = self._get_bbox_center(obj.bbox)
+            
+            # Find closest detection
+            min_distance = float('inf')
+            best_match = None
+            best_idx = -1
+            
+            for i, (det_center, detection) in enumerate(detection_centers):
+                if i in matched_detections:
+                    continue
+                
+                distance = np.sqrt((obj_center[0] - det_center[0])**2 + (obj_center[1] - det_center[1])**2)
+                if distance < min_distance and distance < 100:  # Max tracking distance
+                    min_distance = distance
+                    best_match = detection
+                    best_idx = i
+            
+            if best_match:
+                # Update existing object
+                obj.bbox = tuple(best_match['bbox'])
+                obj.confidence = best_match['confidence']
+                obj.last_seen = current_time
+                
+                # Update state based on stationary detector
+                if obj_id in stationary_map:
+                    stationary_obj = stationary_map[obj_id]
+                    obj.state = 'stationary' if stationary_obj.is_stationary else 'normal'
+                    if stationary_obj.is_dropped:
+                        obj.state = 'dropped'
+                
+                # Update state based on drop events
+                if obj_id in drop_map:
+                    obj.drop_event = drop_map[obj_id]
+                    obj.state = 'dropped'
+                
+                matched_detections.add(best_idx)
+                updated_objects.append(obj)
+            else:
+                # Object not detected, check if it should be kept
+                age = (current_time - obj.last_seen).total_seconds()
+                if age < 5.0:  # Keep for 5 seconds
+                    updated_objects.append(obj)
+        
+        # Add new objects
+        for i, (det_center, detection) in enumerate(detection_centers):
+            if i not in matched_detections:
+                obj_id = f"obj_{self.next_object_id}"
+                self.next_object_id += 1
+                
+                new_obj = ObjectState(
+                    object_id=obj_id,
+                    bbox=tuple(detection['bbox']),
+                    label=detection['label'],
+                    confidence=detection['confidence'],
+                    state='normal',
+                    last_seen=current_time,
+                    position_history=[det_center]
+                )
+                
+                # Check if this is already stationary or dropped
+                if obj_id in stationary_map:
+                    stationary_obj = stationary_map[obj_id]
+                    new_obj.state = 'stationary' if stationary_obj.is_stationary else 'normal'
+                    if stationary_obj.is_dropped:
+                        new_obj.state = 'dropped'
+                
+                if obj_id in drop_map:
+                    new_obj.drop_event = drop_map[obj_id]
+                    new_obj.state = 'dropped'
+                
+                updated_objects.append(new_obj)
+        
+        # Update tracking dictionary
+        self.tracked_objects = {obj.object_id: obj for obj in updated_objects}
+        
+        return updated_objects
+    
+    def _update_person_tracking(self, detections: List[Dict], timestamp: float) -> List[PersonDetection]:
+        """Update person tracking with enhanced features."""
+        current_time = datetime.fromtimestamp(timestamp)
+        updated_persons = []
+        
+        detection_centers = [(self._get_bbox_center(d['bbox']), d) for d in detections]
+        matched_detections = set()
+        
+        # Match existing persons
+        for person_id, person in list(self.tracked_persons.items()):
+            person_center = self._get_bbox_center(person.bbox)
+            
+            # Find closest detection
+            min_distance = float('inf')
+            best_match = None
+            best_idx = -1
+            
+            for i, (det_center, detection) in enumerate(detection_centers):
+                if i in matched_detections:
+                    continue
+                
+                distance = np.sqrt((person_center[0] - det_center[0])**2 + (person_center[1] - det_center[1])**2)
+                if distance < min_distance and distance < 150:  # Max tracking distance for persons
+                    min_distance = distance
+                    best_match = detection
+                    best_idx = i
+            
+            if best_match:
+                # Update existing person
+                old_center = person_center
+                new_center = self._get_bbox_center(best_match['bbox'])
+                
+                person.bbox = tuple(best_match['bbox'])
+                person.confidence = best_match['confidence']
+                person.last_seen = current_time
+                
+                # Update trajectory
+                person.trajectory.append(new_center)
+                if len(person.trajectory) > 20:
+                    person.trajectory.pop(0)
+                
+                # Calculate velocity
+                if len(person.trajectory) >= 2:
+                    prev_pos = person.trajectory[-2]
+                    distance = np.sqrt((new_center[0] - prev_pos[0])**2 + (new_center[1] - prev_pos[1])**2)
+                    person.velocity = distance  # pixels per frame
+                
+                matched_detections.add(best_idx)
+                updated_persons.append(person)
+            else:
+                # Person not detected, check if it should be kept
+                age = (current_time - person.last_seen).total_seconds()
+                if age < 3.0:  # Keep for 3 seconds
+                    updated_persons.append(person)
+        
+        # Add new persons
+        for i, (det_center, detection) in enumerate(detection_centers):
+            if i not in matched_detections:
+                person_id = f"person_{self.next_person_id}"
+                self.next_person_id += 1
+                
+                new_person = PersonDetection(
+                    person_id=person_id,
+                    bbox=tuple(detection['bbox']),
+                    confidence=detection['confidence'],
+                    last_seen=current_time,
+                    trajectory=[det_center]
+                )
+                
+                updated_persons.append(new_person)
+        
+        # Update tracking dictionary
+        self.tracked_persons = {person.person_id: person for person in updated_persons}
+        
+        return updated_persons
+    
+    def _detect_interactions(self, objects: List[ObjectState], persons: List[PersonDetection], 
+                           timestamp: float) -> List[InteractionEvent]:
+        """Detect person-object interactions with enhanced logic."""
+        interactions = []
+        current_time = datetime.fromtimestamp(timestamp)
+        
+        for person in persons:
+            person_center = self._get_bbox_center(person.bbox)
+            
+            for obj in objects:
+                obj_center = self._get_bbox_center(obj.bbox)
+                distance = np.sqrt((person_center[0] - obj_center[0])**2 + (person_center[1] - obj_center[1])**2)
+                
+                # Check for proximity
+                if distance < self.proximity_threshold:
+                    person.near_objects.add(obj.object_id)
+                    obj.person_nearby = True
+                    
+                    # Check for pickup attempt
+                    if distance < self.interaction_threshold:
+                        interaction_type = "pickup_attempt"
+                        alert_level = "warning"
+                        
+                        # Check if object was dropped by this person
+                        if obj.drop_event and obj.drop_event.person_id == person.person_id:
+                            interaction_type = "retrieving_own_item"
+                            alert_level = "info"
+                        
+                        # Check if object state changed to picked up
+                        if obj.state == 'picked_up':
+                            interaction_type = "item_picked_up"
+                            alert_level = "critical"
+                            obj.picked_up_by = person.person_id
+                            obj.pickup_timestamp = current_time
+                            person.carrying_objects.add(obj.object_id)
+                        
+                        event = InteractionEvent(
+                            event_id=f"interaction_{self.next_event_id}",
+                            person_id=person.person_id,
+                            object_id=obj.object_id,
+                            interaction_type=interaction_type,
+                            confidence=min(person.confidence, obj.confidence),
+                            timestamp=current_time,
+                            bbox_person=person.bbox,
+                            bbox_object=obj.bbox,
+                            alert_level=alert_level,
+                            drop_event=obj.drop_event
+                        )
+                        
+                        interactions.append(event)
+                        self.next_event_id += 1
+        
+        return interactions
+    
+    def _get_bbox_center(self, bbox: Tuple[int, int, int, int]) -> Tuple[int, int]:
+        """Get center point of bounding box."""
+        x1, y1, x2, y2 = bbox
+        return ((x1 + x2) // 2, (y1 + y2) // 2)
+    
+    def create_enhanced_overlay(self, frame: np.ndarray, objects: List[ObjectState], 
+                              persons: List[PersonDetection], interactions: List[InteractionEvent],
+                              drop_events: List[DropEvent]) -> np.ndarray:
+        """Create enhanced overlay with all detection information."""
+        overlay = frame.copy()
+        
+        # Draw objects with state-based colors
+        for obj in objects:
+            x1, y1, x2, y2 = obj.bbox
+            
+            # Color based on state
+            if obj.state == 'dropped':
+                color = (0, 0, 255)    # Red for dropped
+            elif obj.state == 'stationary':
+                color = (0, 255, 255)  # Yellow for stationary
+            elif obj.state == 'picked_up':
+                color = (255, 0, 255)  # Magenta for picked up
+            else:
+                color = (0, 255, 0)    # Green for normal
+            
+            # Draw bounding box
+            thickness = 3 if obj.state in ['dropped', 'picked_up'] else 2
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), color, thickness)
+            
+            # Draw label with state
+            label_text = f"{obj.label} ({obj.state})"
+            if obj.drop_event:
+                label_text += f" [DROP: {obj.drop_event.confidence:.2f}]"
+            
+            cv2.putText(overlay, label_text, (x1, y1-10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        
+        # Draw persons
+        for person in persons:
+            x1, y1, x2, y2 = person.bbox
+            color = (255, 0, 0) if person.suspicious_behavior else (255, 255, 0)
+            
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2)
+            
+            label = f"Person {person.person_id}"
+            if person.carrying_objects:
+                label += f" [Carrying: {len(person.carrying_objects)}]"
+            
+            cv2.putText(overlay, label, (x1, y1-10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            
+            # Draw trajectory
+            if len(person.trajectory) > 1:
+                points = np.array(person.trajectory, np.int32)
+                cv2.polylines(overlay, [points], False, color, 1)
+        
+        # Draw interactions
+        for interaction in interactions:
+            if interaction.bbox_person and interaction.bbox_object:
+                person_center = self._get_bbox_center(interaction.bbox_person)
+                object_center = self._get_bbox_center(interaction.bbox_object)
+                
+                color = (0, 0, 255) if interaction.alert_level == 'critical' else (255, 0, 255)
+                cv2.line(overlay, person_center, object_center, color, 3)
+                
+                # Draw interaction label
+                mid_point = ((person_center[0] + object_center[0]) // 2,
+                           (person_center[1] + object_center[1]) // 2)
+                cv2.putText(overlay, interaction.interaction_type.upper(), 
+                           mid_point, cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        
+        # Draw drop events
+        for drop in drop_events:
+            x, y = drop.drop_location
+            cv2.circle(overlay, (x, y), 15, (0, 0, 255), 3)
+            cv2.putText(overlay, f"DROP: {drop.confidence:.2f}", 
+                       (x-30, y-20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        
+        return overlay
+    
+    def reset(self):
+        """Reset all detector states."""
+        self.tracked_objects.clear()
+        self.tracked_persons.clear()
+        self.interaction_events.clear()
+        self.next_object_id = 1
+        self.next_person_id = 1
+        self.next_event_id = 1
+        
+        self.stationary_detector.reset()
+        self.drop_detector.reset()
+        self.motion_detector.reset()
+        
+        logger.info("Industry-standard detector reset")
     acknowledged: bool = False
 
 
